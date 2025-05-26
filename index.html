@@ -5,6 +5,11 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/theme/monokai.min.css">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/lua/lua.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/edit/closebrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/edit/matchbrackets.min.js"></script>
+    <script src="node_modules/fengari-web/dist/fengari-web.js"></script>
     <style>
         body {
             margin: 0;
@@ -197,10 +202,60 @@
         .CodeMirror {
             width: 100%;
             height: 100%;
-            flex-grow: 1;
             font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
             font-size: 14px;
-            line-height: 21px;
+            line-height: 1.5;
+        }
+        .CodeMirror-gutters {
+            background: #1e1e1e !important;
+        }
+        .CodeMirror-linenumber {
+            color: #858585;
+            padding: 0 8px;
+        }
+        .breakpoint {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #e51400;
+            margin: auto;
+            margin-top: 6px;
+        }
+        .minimap {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 60px;
+            background: #1e1e1e;
+            overflow: hidden;
+            z-index: 10;
+            border-left: 1px solid #3c3c3c;
+        }
+        .minimap .CodeMirror {
+            font-size: 2px;
+            line-height: 3px;
+            pointer-events: none;
+            opacity: 0.6;
+        }
+        .minimap .CodeMirror-lines {
+            padding: 0;
+        }
+        .minimap .CodeMirror-scroll {
+            margin-right: 0 !important;
+        }
+        .minimap-slider {
+            position: absolute;
+            right: 0;
+            width: 60px;
+            background: rgba(100, 100, 100, 0.2);
+            z-index: 11;
+        }
+        .minimap-slider:hover {
+            background: rgba(100, 100, 100, 0.3);
+        }
+        .CodeMirror.has-minimap {
+            margin-right: 60px;
         }
         .title-bar {
             height: 35px;
@@ -339,49 +394,6 @@
         .cm-s-monokai.CodeMirror {
             background: #1e1e1e;
         }
-        .CodeMirror-gutters {
-            background: #252526 !important;
-            border-right: 1px solid #3c3c3c !important;
-        }
-        .CodeMirror-linenumber {
-            color: #858585 !important;
-        }
-        .minimap {
-            position: absolute;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            width: 60px;
-            background: #1e1e1e;
-            overflow: hidden;
-            z-index: 10;
-        }
-        .minimap .CodeMirror {
-            font-size: 2px;
-            line-height: 3px;
-            pointer-events: none;
-            opacity: 0.6;
-        }
-        .minimap .CodeMirror-lines {
-            padding: 0;
-        }
-        .minimap .CodeMirror-scroll {
-            margin-right: 0 !important;
-        }
-        .minimap-slider {
-            position: absolute;
-            right: 0;
-            width: 60px;
-            background: rgba(100, 100, 100, 0.2);
-            z-index: 11;
-        }
-        .minimap-slider:hover {
-            background: rgba(100, 100, 100, 0.3);
-        }
-        /* Adjust main editor to make room for minimap */
-        .CodeMirror.has-minimap {
-            margin-right: 60px;
-        }
         .open-folder-button i {
             font-size: 16px;
             margin-right: 4px;
@@ -393,6 +405,8 @@
             overflow-x: auto;
             user-select: none;
             border-bottom: 1px solid #3c3c3c;
+            align-items: center;
+            padding: 0 10px;
         }
         .tab-bar::-webkit-scrollbar {
             height: 0;
@@ -453,6 +467,127 @@
         .tab.active .close:hover {
             background: rgba(255, 255, 255, 0.2);
         }
+        .run-button {
+            display: flex;
+            align-items: center;
+            padding: 4px 8px;
+            margin-left: auto;
+            background: #4d4d4d;
+            color: #ffffff;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            gap: 4px;
+        }
+        .run-button:hover {
+            background: #608b4e;
+        }
+        .run-button i {
+            font-size: 16px;
+        }
+        .run-button.running {
+            background: #608b4e;
+            pointer-events: none;
+        }
+        /* Debug controls */
+        .debug-controls {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            margin-left: 10px;
+        }
+        .debug-controls.active {
+            display: flex;
+        }
+        .debug-button {
+            display: flex;
+            align-items: center;
+            padding: 4px 8px;
+            background: #4d4d4d;
+            color: #ffffff;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            gap: 4px;
+        }
+        .debug-button:hover {
+            background: #608b4e;
+        }
+        .debug-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .debug-button i {
+            font-size: 16px;
+        }
+        /* Breakpoint styling */
+        .CodeMirror-gutter-wrapper {
+            cursor: pointer;
+        }
+        .debug-line {
+            background-color: rgba(14, 99, 156, 0.3) !important;
+        }
+        /* Update tab bar to include debug controls */
+        .tab-bar {
+            display: flex;
+            background: #252526;
+            height: 35px;
+            overflow-x: auto;
+            user-select: none;
+            border-bottom: 1px solid #3c3c3c;
+            align-items: center;
+            padding: 0 10px;
+        }
+        .debug-variable {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            padding: 4px 8px;
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid #3c3c3c;
+        }
+        .debug-variable .name {
+            color: #9cdcfe;
+        }
+        .debug-variable .value {
+            color: #ce9178;
+        }
+        .debug-panel {
+            display: none;
+            background: #1e1e1e;
+            border-left: 1px solid #3c3c3c;
+            width: 300px;
+            overflow: auto;
+        }
+        .debug-panel.active {
+            display: block;
+        }
+        .debug-panel-header {
+            padding: 8px;
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #cccccc;
+            background: #252526;
+            border-bottom: 1px solid #3c3c3c;
+        }
+        .debug-variables {
+            padding: 0;
+        }
+        /* Breakpoint styles for Monaco Editor */
+        .breakpoint {
+            background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='8' fill='%23e51400'/%3E%3C/svg%3E") center center no-repeat;
+            cursor: pointer;
+        }
+        .monaco-editor .margin-view-overlays .line-numbers {
+            cursor: pointer;
+        }
+        /* Editor container styles */
+        #editor-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
     </style>
 </head>
 <body>
@@ -478,14 +613,42 @@
                         <i class="material-icons">close</i>
                     </span>
                 </div>
+                <button class="run-button" id="runButton">
+                    <i class="material-icons">play_arrow</i>
+                    Run
+                </button>
+                <div class="debug-controls" id="debugControls">
+                    <button class="debug-button" id="debugContinue" disabled>
+                        <i class="material-icons">play_arrow</i>
+                        Continue
+                    </button>
+                    <button class="debug-button" id="debugStepOver" disabled>
+                        <i class="material-icons">step_over</i>
+                        Step Over
+                    </button>
+                    <button class="debug-button" id="debugStepInto" disabled>
+                        <i class="material-icons">keyboard_arrow_down</i>
+                        Step Into
+                    </button>
+                    <button class="debug-button" id="debugStop" disabled>
+                        <i class="material-icons">stop</i>
+                        Stop
+                    </button>
+                </div>
             </div>
-            <div class="editor-container">
-                <textarea id="editor">-- Welcome to Lua Editor
+            <div class="main-content">
+                <div class="editor-container">
+                    <textarea id="editor">-- Welcome to Lua Editor
 local function hello()
     print("Hello, World!")
 end
 
 hello()</textarea>
+                </div>
+                <div class="debug-panel" id="debugPanel">
+                    <div class="debug-panel-header">Variables</div>
+                    <div class="debug-variables" id="debugVariables"></div>
+                </div>
             </div>
             <div class="console-container">
                 <div class="console-header">
@@ -502,8 +665,7 @@ hello()</textarea>
             </div>
         </div>
     </div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/lua/lua.min.js"></script>
+    <script src="https://fengari.dev/fengari-web.js"></script>
     <script src="renderer.js"></script>
 </body>
 </html> 

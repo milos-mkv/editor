@@ -16,6 +16,9 @@ let editor; // CodeMirror instance
 let expandedPaths = new Set(); // Keep track of expanded folders
 let openFiles = new Map(); // Map of open files: path -> { editor, content }
 let activeFile = null; // Currently active file path
+let breakpoints = new Set();
+let debugState = null;
+let currentDebugLine = null;
 
 // Function to get cursor position
 function getCaretPosition(element) {
@@ -311,10 +314,8 @@ function createTab(filePath) {
     const fileName = path.basename(filePath);
     const tab = document.createElement('div');
     tab.className = 'tab';
-    if (activeFile === filePath) {
-        tab.classList.add('active');
-    }
-
+    tab.dataset.path = filePath;
+    
     const icon = document.createElement('span');
     icon.className = 'icon';
     const iconI = document.createElement('i');
@@ -365,6 +366,8 @@ function switchToFile(filePath) {
     const newTab = document.querySelector(`.tab[data-path="${filePath}"]`);
     if (newTab) {
         newTab.classList.add('active');
+        // Ensure the tab is visible by scrolling to it
+        newTab.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
     }
 
     // Update editor content
@@ -412,8 +415,17 @@ function openFile(filePath) {
         if (!openFiles.has(filePath)) {
             const tabBar = document.querySelector('.tab-bar');
             const tab = createTab(filePath);
-            tab.dataset.path = filePath;
-            tabBar.appendChild(tab);
+            
+            // Find the active tab and insert the new tab after it
+            const activeTab = tabBar.querySelector('.tab.active');
+            if (activeTab) {
+                activeTab.classList.remove('active');
+                activeTab.insertAdjacentElement('afterend', tab);
+            } else {
+                // If no active tab, insert at the beginning (before run button)
+                const runButton = tabBar.querySelector('.run-button');
+                tabBar.insertBefore(tab, runButton);
+            }
             
             openFiles.set(filePath, {
                 content: content
@@ -713,6 +725,24 @@ function initConsole() {
         if (editor && editor.refresh) {
             editor.refresh();
         }
+        // Force minimap refresh
+        const minimap = document.querySelector('.minimap');
+        if (minimap) {
+            const minimapEditor = minimap.querySelector('.CodeMirror');
+            if (minimapEditor && minimapEditor.CodeMirror) {
+                setTimeout(() => {
+                    minimapEditor.CodeMirror.refresh();
+                    // Update minimap slider height
+                    const slider = document.querySelector('.minimap-slider');
+                    if (slider) {
+                        const editorHeight = editor.getScrollInfo().clientHeight;
+                        const totalHeight = editor.getScrollInfo().height;
+                        const sliderHeight = (editorHeight / totalHeight) * minimap.clientHeight;
+                        slider.style.height = `${sliderHeight}px`;
+                    }
+                }, 0);
+            }
+        }
     });
 
     // Double click header to toggle maximize
@@ -801,54 +831,406 @@ function initConsole() {
     console.log('Welcome to Lua Editor');
 }
 
-// Update the DOMContentLoaded event listener
+// Function to toggle breakpoint
+function toggleBreakpoint(lineNumber) {
+    const model = editor.getModel();
+    const decorations = model.getLineDecorations(lineNumber);
+    const hasBreakpoint = decorations.some(d => d.options.glyphMarginClassName === 'breakpoint');
+    
+    if (hasBreakpoint) {
+        // Remove breakpoint
+        const newDecorations = decorations
+            .filter(d => d.options.glyphMarginClassName !== 'breakpoint')
+            .map(d => ({
+                range: d.range,
+                options: d.options
+            }));
+        model.deltaDecorations(decorations.map(d => d.id), newDecorations);
+        breakpoints.delete(lineNumber);
+    } else {
+        // Add breakpoint
+        model.deltaDecorations([], [{
+            range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+            options: {
+                isWholeLine: true,
+                glyphMarginClassName: 'breakpoint',
+                glyphMarginHoverMessage: { value: 'Breakpoint' }
+            }
+        }]);
+        breakpoints.add(lineNumber);
+    }
+}
+
+// Base Lua execution function
+async function runLuaCode() {
+    const runButton = document.getElementById('runButton');
+    runButton.classList.add('running');
+    let L = null;
+    let shouldContinue = false;
+    
+    try {
+        const code = editor.getValue();
+        if (!code.trim()) {
+            console.log('No code to execute');
+            return;
+        }
+
+        // Create new Lua state
+        L = fengari.lauxlib.luaL_newstate();
+        if (!L) {
+            throw new Error('Failed to create Lua state');
+        }
+
+        // Open standard libraries
+        fengari.lualib.luaL_openlibs(L);
+
+        // Set up debug controls
+        const debugContinue = document.getElementById('debugContinue');
+        const debugStepOver = document.getElementById('debugStepOver');
+        const debugStepInto = document.getElementById('debugStepInto');
+        const debugStop = document.getElementById('debugStop');
+
+        // Clear any previous handlers
+        debugContinue.onclick = null;
+        debugStepOver.onclick = null;
+        debugStepInto.onclick = null;
+        debugStop.onclick = null;
+
+        // Set up new handlers
+        debugContinue.onclick = () => {
+            shouldContinue = true;
+        };
+
+        debugStepOver.onclick = () => {
+            if (debugState) {
+                const nextLine = debugState.line + 1;
+                breakpoints.add(nextLine);
+                shouldContinue = true;
+                setTimeout(() => {
+                    breakpoints.delete(nextLine);
+                }, 0);
+            }
+        };
+
+        debugStepInto.onclick = () => {
+            shouldContinue = true;
+        };
+
+        debugStop.onclick = () => {
+            if (L) {
+                fengari.lua.lua_close(L);
+                L = null;
+            }
+            cleanup();
+        };
+
+        // Override print function
+        const luaPrint = function(L) {
+            const nargs = fengari.lua.lua_gettop(L);
+            const args = [];
+            for (let i = 1; i <= nargs; i++) {
+                if (fengari.lua.lua_isstring(L, i)) {
+                    args.push(fengari.lua.lua_tojsstring(L, i));
+                } else if (fengari.lua.lua_isnumber(L, i)) {
+                    args.push(fengari.lua.lua_tonumber(L, i));
+                } else if (fengari.lua.lua_isnil(L, i)) {
+                    args.push('nil');
+                } else if (fengari.lua.lua_isboolean(L, i)) {
+                    args.push(fengari.lua.lua_toboolean(L, i) ? 'true' : 'false');
+                } else {
+                    args.push(fengari.lua.lua_typename(L, fengari.lua.lua_type(L, i)));
+                }
+            }
+            console.log(args.join(' '));
+            return 0;
+        };
+
+        fengari.lua.lua_pushjsfunction(L, luaPrint);
+        fengari.lua.lua_setglobal(L, 'print');
+
+        // Set up debug hook with optimized waiting
+        fengari.lua.lua_sethook(L, (L, ar) => {
+            if (!ar || typeof ar.currentline !== 'number') return;
+            const currentLine = ar.currentline;
+            
+            if (breakpoints.has(currentLine)) {
+                shouldContinue = false;
+                debugState = { line: currentLine };
+                
+                // Update UI using requestAnimationFrame for better performance
+                requestAnimationFrame(() => {
+                    highlightDebugLine(currentLine);
+                    updateDebugControls(true);
+                });
+
+                // Use a more efficient waiting mechanism
+                const checkContinue = () => {
+                    if (!shouldContinue) {
+                        setTimeout(checkContinue, 50); // Reduced interval for better responsiveness
+                        return;
+                    }
+                    
+                    requestAnimationFrame(() => {
+                        highlightDebugLine(null);
+                        updateDebugControls(false);
+                    });
+                    debugState = null;
+                };
+                
+                checkContinue();
+            }
+        }, fengari.lua.LUA_MASKLINE, 0);
+
+        // Execute code in chunks to allow UI updates
+        const executeChunk = async () => {
+            const loadStatus = fengari.lauxlib.luaL_loadstring(L, fengari.to_luastring(code));
+            if (loadStatus !== 0) {
+                const error = fengari.lua.lua_tojsstring(L, -1);
+                throw new Error('Lua Syntax Error: ' + error);
+            }
+
+            // Run with periodic yields to keep UI responsive
+            const runStatus = fengari.lua.lua_pcall(L, 0, 0, 0);
+            if (runStatus !== 0) {
+                const error = fengari.lua.lua_tojsstring(L, -1);
+                throw new Error('Lua Runtime Error: ' + error);
+            }
+        };
+
+        // Start execution with a small delay to allow UI to update
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await executeChunk();
+        cleanup();
+
+    } catch (error) {
+        console.error('Error:', error.message);
+        cleanup();
+    }
+
+    function cleanup() {
+        if (L) {
+            fengari.lua.lua_close(L);
+            L = null;
+        }
+        runButton.classList.remove('running');
+        updateDebugControls(false);
+        highlightDebugLine(null);
+        debugState = null;
+        shouldContinue = true;
+    }
+}
+
+// Debug controls event handlers
+function initDebugControls() {
+    const debugContinue = document.getElementById('debugContinue');
+    const debugStepOver = document.getElementById('debugStepOver');
+    const debugStepInto = document.getElementById('debugStepInto');
+    const debugStop = document.getElementById('debugStop');
+
+    debugContinue.addEventListener('click', () => {
+        if (debugState) {
+            updateDebugControls(false);
+            highlightDebugLine(null);
+            debugState = null;
+        }
+    });
+
+    debugStepOver.addEventListener('click', () => {
+        if (debugState) {
+            const nextLine = debugState.line + 1;
+            debugState.line = nextLine;
+            highlightDebugLine(nextLine);
+        }
+    });
+
+    debugStepInto.addEventListener('click', () => {
+        if (debugState) {
+            debugState.line = debugState.line + 1;
+        }
+    });
+
+    debugStop.addEventListener('click', () => {
+        if (debugState) {
+            updateDebugControls(false);
+            highlightDebugLine(null);
+            debugState = null;
+            // Force error to stop execution
+            throw new Error('Debugging stopped');
+        }
+    });
+}
+
+// Function to update debug controls
+function updateDebugControls(enabled) {
+    const debugControls = document.getElementById('debugControls');
+    const debugContinue = document.getElementById('debugContinue');
+    const debugStepOver = document.getElementById('debugStepOver');
+    const debugStepInto = document.getElementById('debugStepInto');
+    const debugStop = document.getElementById('debugStop');
+    const debugPanel = document.getElementById('debugPanel');
+
+    debugControls.classList.toggle('active', enabled);
+    debugContinue.disabled = !enabled;
+    debugStepOver.disabled = !enabled;
+    debugStepInto.disabled = !enabled;
+    debugStop.disabled = !enabled;
+    debugPanel.classList.toggle('active', enabled);
+}
+
+// Function to highlight current debug line
+function highlightDebugLine(line) {
+    if (currentDebugLine !== null) {
+        editor.removeLineClass(currentDebugLine, 'background', 'debug-line');
+    }
+    if (line !== null) {
+        editor.addLineClass(line - 1, 'background', 'debug-line');
+        currentDebugLine = line - 1;
+        editor.scrollIntoView({line: line - 1, ch: 0}, 100);
+    }
+}
+
+// Function to update variables panel
+function updateVariables(L) {
+    const debugVariables = document.getElementById('debugVariables');
+    debugVariables.innerHTML = '';
+    
+    if (!debugState || !debugState.ar) return;
+
+    // Get local variables
+    let i = 1;
+    while (true) {
+        const name = fengari.lua.lua_getlocal(L, debugState.ar, i);
+        if (name === null) break;
+        
+        let value;
+        if (fengari.lua.lua_isstring(L, -1)) {
+            value = fengari.lua.lua_tojsstring(L, -1);
+        } else if (fengari.lua.lua_isnumber(L, -1)) {
+            value = fengari.lua.lua_tonumber(L, -1);
+        } else {
+            value = fengari.lua.lua_typename(L, fengari.lua.lua_type(L, -1));
+        }
+
+        const varDiv = document.createElement('div');
+        varDiv.className = 'debug-variable';
+        varDiv.innerHTML = `
+            <span class="name">${name}</span>
+            <span class="value">${value}</span>
+        `;
+        debugVariables.appendChild(varDiv);
+        fengari.lua.lua_pop(L, 1);
+        i++;
+    }
+}
+
+// Debug hook function
+async function debugHook(L, event, line) {
+    if (event === 'line' && breakpoints.has(line)) {
+        debugState = {
+            L: L,
+            line: line,
+            ar: new fengari.lua.lua_Debug()
+        };
+        
+        if (fengari.lua.lua_getstack(L, 0, debugState.ar)) {
+            highlightDebugLine(line);
+            updateVariables(L);
+            updateDebugControls(true);
+            
+            return new Promise((resolve) => {
+                const debugContinue = document.getElementById('debugContinue');
+                const debugStepOver = document.getElementById('debugStepOver');
+                const debugStepInto = document.getElementById('debugStepInto');
+                const debugStop = document.getElementById('debugStop');
+
+                function cleanup() {
+                    updateDebugControls(false);
+                    highlightDebugLine(null);
+                    debugState = null;
+                }
+
+                debugContinue.onclick = () => {
+                    cleanup();
+                    resolve();
+                };
+
+                debugStepOver.onclick = () => {
+                    const nextLine = line + 1;
+                    highlightDebugLine(nextLine);
+                    resolve();
+                };
+
+                debugStepInto.onclick = () => {
+                    resolve();
+                };
+
+                debugStop.onclick = () => {
+                    cleanup();
+                    throw new Error('Debugging stopped');
+                };
+            });
+        }
+    }
+}
+
+// Initialize everything when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM Content Loaded');
-    const openFolderButton = document.getElementById('openFolderButton');
-
-    // Initialize splitter
-    initSplitter();
-
-    // Initialize console
-    initConsole();
-
-    // Initialize CodeMirror
+    
+    // Initialize CodeMirror first
     editor = CodeMirror.fromTextArea(document.getElementById('editor'), {
         mode: 'lua',
         theme: 'monokai',
         lineNumbers: true,
+        gutters: ["CodeMirror-linenumbers", "breakpoints"],
         autoCloseBrackets: true,
         matchBrackets: true,
         indentUnit: 4,
         tabSize: 4,
         indentWithTabs: false,
         lineWrapping: false,
-        scrollbarStyle: 'native',
-        extraKeys: {
-            "Tab": function(cm) {
-                if (cm.somethingSelected()) {
-                    cm.indentSelection("add");
-                } else {
-                    cm.replaceSelection("    ", "end");
-                }
-            }
-        }
+        scrollbarStyle: 'native'
     });
 
     // Create minimap
     createMinimap(editor);
 
-    // Set up open folder button
-    if (openFolderButton) {
-        openFolderButton.addEventListener('click', openFolder);
-        console.log('Open folder button handler attached');
-    } else {
-        console.error('Open folder button not found');
-    }
+    // Add breakpoint handling
+    editor.on("gutterClick", function(cm, n) {
+        var info = cm.lineInfo(n);
+        cm.setGutterMarker(n, "breakpoints", info.gutterMarkers ? null : makeMarker());
+        
+        // Update breakpoints set
+        if (info.gutterMarkers) {
+            breakpoints.delete(n + 1);
+        } else {
+            breakpoints.add(n + 1);
+        }
+    });
 
-    // Initialize file explorer with current directory
+    // Initialize run button
+    const runButton = document.getElementById('runButton');
+    runButton.addEventListener('click', () => window.runLuaCode());
+
+    // Initialize open folder button
+    const openFolderButton = document.getElementById('openFolderButton');
+    openFolderButton.addEventListener('click', openFolder);
+
+    // Initialize other components
+    initSplitter();
+    initConsole();
+    initDebugControls();
+    
+    // Load initial directory
     loadDirectory(process.cwd());
 });
+
+// Function to create breakpoint marker
+function makeMarker() {
+    var marker = document.createElement("div");
+    marker.className = "breakpoint";
+    return marker;
+}
 
 // Wait for Monaco to be ready
 require(['vs/editor/editor.main'], function () {

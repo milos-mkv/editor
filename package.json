@@ -1,7 +1,7 @@
 {
   "name": "lua-editor",
   "version": "1.0.0",
-  "description": "A VS Code-like Lua Editor built with Electron",
+  "description": "Lua Editor with VS Code-like features",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -15,12 +15,13 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "electron": "^28.1.0",
+    "electron": "^28.0.0",
     "electron-builder": "^24.9.1"
   },
   "dependencies": {
-    "@electron/remote": "^2.1.2",
-    "monaco-editor": "^0.45.0"
+    "@electron/remote": "^2.0.1",
+    "fengari": "^0.1.4",
+    "fengari-web": "^0.1.4"
   },
   "build": {
     "appId": "com.luaeditor.app",
