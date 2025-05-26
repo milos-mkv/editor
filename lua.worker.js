@@ -5,14 +5,11 @@ let L = null;
 let isRunning = true;
 
 self.onmessage = function(e) {
-    const { type, code, breakpoints } = e.data;
+    const { type, code } = e.data;
     
     switch(type) {
         case 'execute':
-            executeCode(code, breakpoints);
-            break;
-        case 'continue':
-            self.postMessage({ type: 'resuming' });
+            executeCode(code);
             break;
         case 'stop':
             isRunning = false;
@@ -24,7 +21,7 @@ self.onmessage = function(e) {
     }
 };
 
-function executeCode(code, breakpoints) {
+function executeCode(code) {
     try {
         // Initialize Lua state
         L = fengari.lauxlib.luaL_newstate();
@@ -58,19 +55,6 @@ function executeCode(code, breakpoints) {
 
         fengari.lua.lua_pushjsfunction(L, luaPrint);
         fengari.lua.lua_setglobal(L, 'print');
-
-        // Set up debug hook
-        fengari.lua.lua_sethook(L, (L, ar) => {
-            if (!ar || typeof ar.currentline !== 'number' || !isRunning) return;
-            const currentLine = ar.currentline;
-            
-            if (breakpoints.includes(currentLine)) {
-                self.postMessage({ type: 'breakpoint', line: currentLine });
-                
-                // Wait for continue message
-                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
-            }
-        }, fengari.lua.LUA_MASKLINE, 0);
 
         // Load the code
         const loadStatus = fengari.lauxlib.luaL_loadstring(L, fengari.to_luastring(code));
